@@ -3,7 +3,7 @@
  * Plugin Name: XPayr Crypto Gateway for WooCommerce
  * Plugin URI: https://xpayr.com/plugins
  * Description: Accept crypto payments via XPayr payment sessions.
- * Version: 0.2.1
+ * Version: 0.2.6
  * Author: XPayr
  * Author URI: https://xpayr.com
  * Text Domain: xpayr-crypto-gateway-for-woocommerce
@@ -29,7 +29,7 @@ if (!defined('XPAYRCGFW_PLUGIN_FILE')) {
     define('XPAYRCGFW_PLUGIN_FILE', __FILE__);
 }
 if (!defined('XPAYRCGFW_VERSION')) {
-    define('XPAYRCGFW_VERSION', '0.2.1');
+    define('XPAYRCGFW_VERSION', '0.2.6');
 }
 
 /**
@@ -275,7 +275,7 @@ add_action('plugins_loaded', function () {
                 return ['result' => 'fail'];
             }
 
-            if ($this->secret_key === '' || $this->api_base_url === '') {
+            if ($this->secret_key === '' || $this->api_base_url === '' || $this->webhook_secret === '') {
                 wc_add_notice(__('XPayr API settings are incomplete. Please contact store admin.', 'xpayr-crypto-gateway-for-woocommerce'), 'error');
                 return ['result' => 'fail'];
             }
@@ -384,7 +384,14 @@ add_action('plugins_loaded', function () {
                 exit;
             }
 
-            if ($this->webhook_secret !== '') {
+            if ($this->webhook_secret === '') {
+            // Fail closed: never accept an unsigned webhook.
+            $this->log('Webhook rejected: no webhook secret configured', 'error');
+            status_header(503);
+                echo 'webhook secret not configured';
+                exit;
+        }
+        {
                 $headerSig = isset($_SERVER['HTTP_X_XPAYR_SIGNATURE'])
                     ? isset($_SERVER['HTTP_X_XPAYR_SIGNATURE']) ? sanitize_text_field(wp_unslash($_SERVER['HTTP_X_XPAYR_SIGNATURE'])) : ''
                     : '';
@@ -421,7 +428,15 @@ add_action('plugins_loaded', function () {
 
             switch ($eventType) {
                 case 'payment.completed':
-                    $this->mark_order_paid($order, __('Payment confirmed by XPayr webhook.', 'xpayr-crypto-gateway-for-woocommerce'));
+                    // Never trust the payload for money: confirm the order's OWN session against the XPayr API.
+                    $ownSession = (string) $order->get_meta('_xpayr_session_id');
+                    if ($ownSession === '' || ($sessionId !== '' && !hash_equals($ownSession, $sessionId))) {
+                        $this->log('Webhook session does not match order ' . $order->get_id(), 'warning');
+                        status_header(409);
+                            echo 'session mismatch';
+                            exit;
+                    }
+                    $this->sync_order_status_from_api($order, $ownSession);
                     break;
                 case 'payment.failed':
                     $order->update_status('failed', __('Payment failed on XPayr checkout.', 'xpayr-crypto-gateway-for-woocommerce'));
@@ -760,7 +775,7 @@ add_action('plugins_loaded', function () {
             }
 
             // Both API credentials must be configured.
-            if ($this->secret_key === '' || $this->api_base_url === '') {
+            if ($this->secret_key === '' || $this->api_base_url === '' || $this->webhook_secret === '') {
                 return false;
             }
 
